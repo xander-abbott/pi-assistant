@@ -1,0 +1,16 @@
+SHELL=/bin/bash
+PATH=/home/pi/assistant/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+# Morning greeting — weekdays 7am, weekends 10am
+0 7  * * 1-5 cd /home/pi/assistant && python sender.py morning_greeting >> logs/cron.log 2>&1
+0 10 * * 6,0 cd /home/pi/assistant && python sender.py morning_greeting >> logs/cron.log 2>&1
+
+# Meal check-ins (every day)
+0 9  * * * cd /home/pi/assistant && python sender.py breakfast_checkin >> logs/cron.log 2>&1
+0 12 * * * cd /home/pi/assistant && python sender.py lunch_checkin    >> logs/cron.log 2>&1
+0 18 * * * cd /home/pi/assistant && python sender.py dinner_checkin   >> logs/cron.log 2>&1
+0 21 * * * cd /home/pi/assistant && python sender.py eod_checkin      >> logs/cron.log 2>&1
+
+# Re-ask pass — fires twice daily, checks for unanswered questions due by now
+0 14 * * * cd /home/pi/assistant && python sender.py --reask >> logs/cron.log 2>&1
+0 22 * * * cd /home/pi/assistant && python sender.py --reask >> logs/cron.log 2>&1

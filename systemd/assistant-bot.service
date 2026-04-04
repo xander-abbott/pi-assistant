@@ -1,0 +1,14 @@
+[Unit]
+Description=Productivity Assistant Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=pi
+WorkingDirectory=/home/pi/assistant
+ExecStart=/home/pi/assistant/venv/bin/python bot.py
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
