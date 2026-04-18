@@ -4,3 +4,4 @@ venv/
 __pycache__/
 *.pyc
 logs/*.log
+data/weekly_goals.json
