@@ -28,9 +28,31 @@ def infer_message_key(text: str) -> str | None:
     return None
 
 
+async def handle_done(update: Update, text: str, day_id: int) -> None:
+    """Handle 'Done: <goal label>' — write directly to goal_completions."""
+    label_query = text[5:].strip()  # strip "done:" prefix
+    week_key = db.get_week_key()
+    goal = db.get_goal_by_label(week_key, label_query)
+    if goal:
+        db.record_goal_completion(day_id, week_key, goal["goal_id"], source="proactive")
+        log.info("Marked goal '%s' complete via Done: prefix", goal["goal_id"])
+        await update.message.reply_text(f"Got it — {goal['label']} marked complete.")
+    else:
+        await update.message.reply_text(
+            "Couldn't match that to a goal this week. "
+            "Check your goal labels and try again, or log it manually."
+        )
+
+
 async def handle_message(update: Update, context) -> None:
     text = update.message.text.strip()
+    lower = text.lower()
     day_id = db.get_or_create_day()
+
+    # Done: prefix has special routing — goes to goal_completions, not responses
+    if lower.startswith("done:"):
+        await handle_done(update, text, day_id)
+        return
 
     key = infer_message_key(text)
     if key is None:
@@ -43,7 +65,7 @@ async def handle_message(update: Update, context) -> None:
     else:
         await update.message.reply_text(
             "Not sure what to log that under.\n"
-            "Try starting with: Breakfast, Lunch, Dinner, Workout, Chore, or Run."
+            "Try starting with: Breakfast, Lunch, Dinner, Workout, Chore, Run, Sleep, or Done."
         )
 
 
@@ -59,7 +81,7 @@ def main() -> None:
     app.add_handler(CommandHandler("start", handle_start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     log.info("Bot started, polling...")
-    app.run_polling()
+    app.run_polling(poll_interval=5.0)
 
 
 if __name__ == "__main__":
