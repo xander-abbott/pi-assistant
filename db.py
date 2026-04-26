@@ -90,12 +90,15 @@ def record_sent_message(day_id: int, message_key: str, attempt: int = 1) -> None
         )
 
 
-def record_response(day_id: int, message_key: str, raw_text: str) -> None:
+def record_response(
+    day_id: int, message_key: str, raw_text: str, parsed_value: str | None = None
+) -> int:
     with _connect() as conn:
-        conn.execute(
-            "INSERT INTO responses (day_id, message_key, raw_text) VALUES (?, ?, ?)",
-            (day_id, message_key, raw_text),
+        cur = conn.execute(
+            "INSERT INTO responses (day_id, message_key, raw_text, parsed_value) VALUES (?, ?, ?, ?)",
+            (day_id, message_key, raw_text, parsed_value),
         )
+        return cur.lastrowid
 
 
 def get_unanswered_keys(day_id: int) -> list[str]:
@@ -251,6 +254,49 @@ def get_behind_goals(week_key: str, days_elapsed: int) -> list[dict]:
                 "remaining": target - completed,
             })
     return behind
+
+
+def get_all_goals_with_status(week_key: str, days_elapsed: int) -> list[dict]:
+    """Return all goals for the week with computed status fields."""
+    goals = get_goals_for_week(week_key)
+    completions = get_completions_for_week(week_key)
+    result = []
+    for g in goals:
+        target = g["target_days"]
+        completed = completions.get(g["goal_id"], 0)
+        expected = int(target * (days_elapsed / 7))
+        if completed >= target:
+            status = "complete"
+        elif expected == 0 and completed == 0:
+            status = "not_started"
+        elif completed > expected:
+            status = "ahead"
+        elif completed >= expected:
+            status = "on_track"
+        else:
+            status = "behind"
+        result.append({
+            "goal_id":   g["goal_id"],
+            "label":     g["label"],
+            "category":  g["category"],
+            "target":    target,
+            "completed": completed,
+            "expected":  expected,
+            "status":    status,
+        })
+    return result
+
+
+def get_today_essential_keys(day_id: int) -> set[str]:
+    """Return set of essential message_keys (breakfast/lunch/dinner/sleep) logged today."""
+    essentials = ("breakfast", "lunch", "dinner", "sleep")
+    with _connect() as conn:
+        rows = conn.execute(
+            f"SELECT DISTINCT message_key FROM responses "
+            f"WHERE day_id = ? AND message_key IN ({','.join('?' * len(essentials))})",
+            (day_id, *essentials),
+        ).fetchall()
+    return {r["message_key"] for r in rows}
 
 
 def get_unlinked_responses_for_week(week_start: str, week_end: str) -> list[sqlite3.Row]:

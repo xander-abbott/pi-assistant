@@ -4,6 +4,7 @@ Long-running polling bot. Receives user messages and records them.
 Run once on boot via systemd.
 """
 
+import re
 import logging
 from telegram import Update
 from telegram.ext import Application, MessageHandler, CommandHandler, filters
@@ -19,54 +20,41 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 
-def infer_message_key(text: str) -> str | None:
-    """Match proactive entries like 'Breakfast: bagel' to a message key."""
-    lower = text.lower()
-    for key, prefixes in messages.KEY_PREFIXES.items():
-        if any(lower.startswith(p) for p in prefixes):
-            return key
-    return None
-
-
-async def handle_done(update: Update, text: str, day_id: int) -> None:
-    """Handle 'Done: <goal label>' — write directly to goal_completions."""
-    label_query = text[5:].strip()  # strip "done:" prefix
-    week_key = db.get_week_key()
-    goal = db.get_goal_by_label(week_key, label_query)
-    if goal:
-        db.record_goal_completion(day_id, week_key, goal["goal_id"], source="proactive")
-        log.info("Marked goal '%s' complete via Done: prefix", goal["goal_id"])
-        await update.message.reply_text(f"Got it — {goal['label']} marked complete.")
-    else:
-        await update.message.reply_text(
-            "Couldn't match that to a goal this week. "
-            "Check your goal labels and try again, or log it manually."
-        )
+def _parse_sleep_value(text_after_colon: str) -> str | None:
+    m = re.search(r"\d+(?:\.\d+)?", text_after_colon)
+    return m.group() if m else None
 
 
 async def handle_message(update: Update, context) -> None:
     text = update.message.text.strip()
-    lower = text.lower()
-    day_id = db.get_or_create_day()
 
-    # Done: prefix has special routing — goes to goal_completions, not responses
-    if lower.startswith("done:"):
-        await handle_done(update, text, day_id)
+    if ":" not in text:
+        await update.message.reply_text(
+            "Please use a prefix to log entries, e.g. Breakfast: eggs or Workout: 3 mile run"
+        )
         return
 
-    key = infer_message_key(text)
-    if key is None:
-        key = db.get_last_sent_key(day_id)
+    colon_pos = text.index(":")
+    prefix = text[:colon_pos].strip().lower()
+    day_id = db.get_or_create_day()
+    week_key = db.get_week_key()
 
-    if key and key != messages.MORNING_GREETING:
-        db.record_response(day_id, key, text)
-        log.info("Recorded response for '%s': %s", key, text[:60])
-        await update.message.reply_text("Got it, recorded.")
-    else:
-        await update.message.reply_text(
-            "Not sure what to log that under.\n"
-            "Try starting with: Breakfast, Lunch, Dinner, Workout, Chore, Run, Sleep, or Done."
+    parsed_value = None
+    if prefix == "sleep":
+        parsed_value = _parse_sleep_value(text[colon_pos + 1:])
+
+    response_id = db.record_response(day_id, prefix, text, parsed_value=parsed_value)
+    log.info("Recorded response for '%s': %s", prefix, text[:60])
+
+    goal = db.get_goal_by_label(week_key, prefix)
+    if goal:
+        db.record_goal_completion(
+            day_id, week_key, goal["goal_id"],
+            response_id=response_id, source="prefix_match"
         )
+        log.info("Goal completion recorded for '%s'", goal["goal_id"])
+
+    await update.message.reply_text("Got it, recorded.")
 
 
 async def handle_start(update: Update, context) -> None:

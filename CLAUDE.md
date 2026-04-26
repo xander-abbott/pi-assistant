@@ -18,54 +18,64 @@ Never reference `/home/pi/` — that username does not exist on this machine.
 
 ## Project Status
 
-**Phase 1 — COMPLETE and deployed.** Bot is live, crontab installed, systemd service running. Do not break existing behavior.
-
-**Phase 2 — TO BE BUILT.** Spec is fully designed. See Phase 2 section below for implementation details.
+**Phase 1 — COMPLETE.** Basic logging, scheduling, re-ask logic.
+**Phase 2 — COMPLETE.** Weekly goals, grading, backlog pressure, dynamic morning greeting.
+**Phase 2.5 — COMPLETE.** Prefix-only receiving, dynamic morning goal report, dynamic EOD essentials check, re-ask logic removed.
 
 ---
 
 ## Architecture
 
-- **`sender.py`** — one-shot script called by cron to send a scheduled message by key
-- **`bot.py`** — long-running polling process (systemd service) that receives and records user replies
+- **`sender.py`** — one-shot script called by cron; builds dynamic morning goal report and EOD check-in
+- **`bot.py`** — long-running polling process (systemd service); all incoming messages must have a prefix; prefix is the topic; no inference or fallback logic
 - **`db.py`** — all SQLite interactions; schema auto-creates on `init_db()`
-- **`messages.py`** — all message text and `message_key` constants; edit here to change bot copy
+- **`messages.py`** — all message text, `message_key` constants, goal status templates, tone system
 - **`config.py`** — loads `.env`, fails fast if `BOT_TOKEN` or `CHAT_ID` missing
-- **`etl/`** — data processing scripts (Phase 2); separate from collection logic
-- **`data/weekly_goals.json`** — user-authored weekly goals file (Phase 2); never committed to git
-- **`data/time_blocks.json`** — scheduled block config (Phase 2); read at runtime
+- **`etl/load_weekly_goals.py`** — ingests `weekly_goals.json` into `goals` table; run by cron Monday 6 AM or manually mid-week
+- **`etl/compute_grade.py`** — computes weekly score; in Phase 2.5 this is called by the morning report builder, not standalone cron
+- **`data/weekly_goals.json`** — user-authored weekly goals file; never committed to git
 
 ---
 
 ## Key Design Invariants
 
-These must be respected across all changes:
-
-1. **`message_key` values are permanent.** They are stored in the database. Renaming a key orphans historical data. Only add new keys; never rename existing ones.
-2. **`raw_text` is never modified.** Responses are stored verbatim. `parsed_value` is written separately so the parser can be fixed retroactively.
-3. **No LLM calls at runtime.** All message generation uses pre-written templates with variable substitution. Everything must work offline on the Pi.
-4. **Exact prefix matching only.** `KEY_PREFIXES` uses `startswith` — no fuzzy matching, no NLP. A non-matching message produces an explicit error reply.
-5. **ETL is separate from collection.** Scripts in `etl/` process data after the fact; they never modify `raw_text` on existing rows.
-6. **`DB_PATH` always uses the full absolute path.** Tilde expansion behaves unexpectedly with `scp` and some subprocess calls. Always use `/home/xanderabbott/assistant/data/data.db`.
+1. **`message_key` values are permanent.** Stored in the database. Never rename — only add new keys.
+2. **`raw_text` is never modified.** Responses stored verbatim. `parsed_value` written separately.
+3. **No LLM calls at runtime.** All message generation uses pre-written templates. Must work offline.
+4. **Every logged message requires a prefix.** No prefix → no record. No inference, no fallback.
+5. **ETL is separate from collection.** Scripts in `etl/` never modify `raw_text` on existing rows.
+6. **`DB_PATH` always uses the full absolute path.** Use `/home/xanderabbott/assistant/data/data.db`.
 
 ---
 
-## Existing Database Schema (Phase 1)
+## Database Schema (complete)
 
 ```sql
-days           — one row per calendar date (id, date, created_at)
-sent_messages  — every outbound message (id, day_id, message_key, sent_at, attempt)
-responses      — every user reply (id, day_id, message_key, raw_text, parsed_value, received_at)
+-- Phase 1 (unchanged)
+days             (id, date, created_at)
+sent_messages    (id, day_id, message_key, sent_at, attempt)
+responses        (id, day_id, message_key, raw_text, parsed_value, received_at)
+
+-- Phase 2 (unchanged)
+goals            (id, week_key, goal_id, category, label, target_days, created_at)
+                 UNIQUE(week_key, goal_id)
+
+goal_completions (id, day_id, week_key, goal_id, response_id, source, completed_at)
+                 source = 'prefix_match' | 'manual'
+                 response_id references responses.id
+
+weekly_grades    (id, week_key, graded_at, score_pct, breakdown_json, message_sent)
 ```
 
-`get_unanswered_keys(day_id)` LEFT JOINs `sent_messages` vs `responses` to find gaps — drives re-ask logic. `parsed_value` is currently unused and reserved for Phase 2 goal linking.
+**Schema change in Phase 2.5:** `goal_completions.source` values change from `'proactive'/'scheduled'` to `'prefix_match'/'manual'`. All completions now originate from prefix-matched responses — there is no longer a separate `Done:` flow.
 
 ---
 
-## Existing Message Keys (Phase 1)
+## Message Keys
 
-Defined as constants in `messages.py`. Do not rename.
+All defined as constants in `messages.py`. Never rename — stored in database.
 
+**Phase 1 (original):**
 ```
 morning_greeting
 breakfast_checkin
@@ -74,161 +84,184 @@ dinner_checkin
 eod_checkin
 ```
 
----
-
-## Existing Prefix Rules (Phase 1)
-
-In `bot.py`, `infer_message_key()` uses exact `startswith` matching (lowercased):
-
-| Prefix(es) | Maps to |
-|---|---|
-| `breakfast:` | `breakfast_checkin` |
-| `lunch:` | `lunch_checkin` |
-| `dinner:` | `dinner_checkin` |
-| `workout:`, `chore:`, `gym:`, `run:`, `calisthenics:`, `eod:` | `eod_checkin` |
-
-If no prefix matches, falls back to `get_last_sent_key(day_id)`.
-
----
-
-## Phase 2 Specification
-
-### Overview
-
-Phase 2 adds weekly goal tracking, time-blocked daily structure, backlog pressure, and automated intra-week grading. It extends Phase 1 without replacing it.
-
-**Weekly rhythm:**
-- **Mon–Fri:** Execution. Structured check-ins, log completions, surface backlog.
-- **Saturday:** Recovery buffer. Last chance to hit weekly targets. Backlog surfaced prominently.
-- **Sunday:** Reflection and reset. Grade published at noon. Planning prompt at 8 PM.
-
-**Sunday noon cutoff:** Completions logged before 12:00 PM Sunday count toward that week's grade. Grade is computed and sent at noon. Nothing after noon rolls back into the closed week.
-
----
-
-### New Files to Create
-
-```
-etl/load_weekly_goals.py   — ingest weekly_goals.json into goals table
-etl/compute_grade.py       — compute score, write weekly_grades, send Telegram message
-etl/link_responses.py      — match responses to goal_ids, write parsed_value nightly
-data/weekly_goals.json     — user-authored (gitignored); keyed by ISO week string
-data/time_blocks.json      — block schedule config; send/re-ask times per category
-```
-
----
-
-### New Database Tables (Phase 2)
-
-Add these to the `DDL` string in `db.py`:
-
-```sql
-CREATE TABLE IF NOT EXISTS goals (
-    id          INTEGER PRIMARY KEY,
-    week_key    TEXT NOT NULL,           -- e.g. '2026-W17'
-    goal_id     TEXT NOT NULL,           -- e.g. 'w1'; unique per week_key
-    category    TEXT NOT NULL,           -- workout / nutrition / chore / personal
-    label       TEXT NOT NULL,           -- human-readable; used for Done: matching
-    target_days INTEGER NOT NULL,        -- completions needed this week (weekly total, not per-day)
-    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
-    UNIQUE(week_key, goal_id)
-);
-
-CREATE TABLE IF NOT EXISTS goal_completions (
-    id           INTEGER PRIMARY KEY,
-    day_id       INTEGER NOT NULL REFERENCES days(id),
-    week_key     TEXT NOT NULL,
-    goal_id      TEXT NOT NULL,
-    response_id  INTEGER REFERENCES responses(id),  -- NULL if logged via Done: prefix
-    source       TEXT NOT NULL,                      -- 'scheduled' or 'proactive'
-    completed_at TEXT NOT NULL DEFAULT (datetime('now'))
-);
-
-CREATE TABLE IF NOT EXISTS weekly_grades (
-    id              INTEGER PRIMARY KEY,
-    week_key        TEXT NOT NULL,
-    graded_at       TEXT NOT NULL DEFAULT (datetime('now')),
-    score_pct       REAL NOT NULL,          -- completions / target_days, 0.0–1.0
-    breakdown_json  TEXT NOT NULL,          -- per-category scores as JSON
-    message_sent    INTEGER NOT NULL DEFAULT 0
-);
-```
-
----
-
-### New Message Keys (Phase 2)
-
-Add these constants to `messages.py` and add corresponding entries to `MESSAGE_TEXT` and `REASK_PREFIX` where applicable:
-
+**Phase 2 (added):**
 ```
 sleep_log
-weekly_grade_wed
-weekly_grade_fri
-weekly_grade_sun
 weekly_planning_prompt
 backlog_nudge
 ```
 
----
-
-### New Prefix Rules (Phase 2)
-
-Extend `KEY_PREFIXES` in `messages.py` and update `infer_message_key()` in `bot.py`:
-
-| Prefix | Maps to | Notes |
-|---|---|---|
-| `sleep:` | `sleep_log` | e.g. `Sleep: 7.5` |
-| `done:` | `goal_completion` | Proactive completion — special handling required (see below) |
-
-**`Done:` prefix handling** is distinct from all other prefixes. When `bot.py` receives a `done:` message, it must:
-1. Extract the text after `done:`, strip and lowercase it
-2. Query `goals` for the current `week_key`, compare against `label` (case-insensitive exact match)
-3. If matched: insert a row into `goal_completions` with `source = 'proactive'`, `response_id = NULL`; reply "Got it — [label] marked complete."
-4. If no match: reply "Couldn't match that to a goal this week. Check your goal labels and try again, or log it manually."
-
-Do not route `done:` through `record_response()` — it writes directly to `goal_completions`.
+**Phase 2.5 changes:**
+- `weekly_grade_wed`, `weekly_grade_fri`, `weekly_grade_sun` — removed from cron; grade is now embedded in the daily morning greeting
+- `goal_completion` — removed; `Done:` prefix is eliminated entirely
+- `eod_checkin` — repurposed; now dynamic, only fires if daily essentials are missing
 
 ---
 
-### Time-Block Schedule
+## Prefix Rules (Phase 2.5)
 
-Defined in `data/time_blocks.json`. Default values below. All times America/Chicago.
+**The fundamental change:** `bot.py` no longer has `infer_message_key()`, `KEY_PREFIXES`, or `get_last_sent_key()`. Every message must contain a `:`. Whatever comes before the `:` is the topic and becomes the `message_key` stored in `responses`.
 
-**Weekdays (Mon–Fri):**
+### Receiving flow in bot.py
 
-| Block key | Send at | Re-ask at | Category |
-|---|---|---|---|
-| `morning_greeting` | 7:00 AM | — | Daily preview |
-| `breakfast_checkin` | 8:30 AM | 11:00 AM | Nutrition + sleep log |
-| `lunch_checkin` | 12:00 PM | 2:00 PM | Nutrition |
-| `eod_checkin` (workout) | 6:15 PM | 9:00 PM | Workout / activity |
-| `dinner_checkin` | 7:00 PM | 9:30 PM | Nutrition |
-| `eod_checkin` (wrap) | 9:30 PM | 11:00 PM | All-category catch-all |
+```
+message received
+  → does it contain ':'?
+      NO  → reply "Please use a prefix to log entries, e.g. Breakfast: eggs or Workout: 3 mile run"
+            do not record anything
+      YES → extract prefix (text before ':', stripped, lowercased for matching)
+          → write to responses (day_id, message_key=prefix, raw_text=full text)
+          → does prefix case-insensitively match any goal label for this week?
+              YES → also write to goal_completions (source='prefix_match', response_id=responses.id)
+              NO  → no goal_completions row; just a log entry
+          → reply "Got it, recorded."
+```
 
-**Saturday:**
+### Special numeric parsing for Sleep
 
-| Block key | Send at | Re-ask at | Notes |
-|---|---|---|---|
-| `morning_greeting` | 10:00 AM | — | Leads with full weekly backlog summary |
-| `breakfast_checkin` | 10:30 AM | 1:00 PM | |
-| `lunch_checkin` | 1:00 PM | 3:00 PM | |
-| `backlog_nudge` | 3:00 PM | 6:00 PM | Workout/chores; references remaining weekly targets |
-| `dinner_checkin` | 6:30 PM | 9:00 PM | |
-| `eod_checkin` | 9:30 PM | 11:00 PM | Names any outstanding goals explicitly |
+When prefix is `sleep`, extract the numeric value from `raw_text` and write it to `parsed_value` on the `responses` row. This enables weekly hour total calculation for sleep goals. Example: `Sleep: 7.5` → `parsed_value = '7.5'`.
 
-**Sunday:**
+### No Done: prefix
 
-| Block key | Send at | Notes |
-|---|---|---|
-| `breakfast_checkin` | 10:00 AM | Includes reminder that noon is grade cutoff |
-| `weekly_grade_sun` | 12:00 PM | Grade computed from all completions through 11:59 AM |
-| `lunch_checkin` | 1:00 PM | No re-ask pressure — week is closed |
-| `dinner_checkin` | 6:30 PM | |
-| `weekly_planning_prompt` | 8:00 PM | Prompt to drop next week's weekly_goals.json |
+`Done:` is eliminated. Logging a prefixed message IS the completion event. There is no separate step.
+
+### No fallback inference
+
+If no `:` is present, nothing is recorded. The bot replies with a prompt to use a prefix. This applies even when the message follows a scheduled check-in question.
 
 ---
 
-### Weekly Goals Input Format
+## Outbound Message Changes (Phase 2.5)
+
+### Morning greeting → Daily goal report
+
+The static morning greeting is replaced entirely with a dynamic daily goal status report. Fires every day (weekdays 7 AM, weekends 10 AM).
+
+**`_build_morning_report()` in sender.py:**
+1. Gets current `week_key` and `days_elapsed`
+2. Calls `db.get_all_goals_with_status(week_key, days_elapsed)` — returns all goals with `completed`, `expected`, `target`, and a status of `behind` / `on_track` / `ahead` / `complete` / `not_started`
+3. Computes current weekly score: `SUM(min(completed, target)) / SUM(target)`
+4. Builds message:
+
+```
+Week score: 42% — W17
+
+✅ Stretch — 2/5 (on track)
+⚠️  Workout — 0/1 expected by now (behind)
+✔️ Laundry — 1/1 (complete)
+⬜ Groceries — 0/1 (not started)
+```
+
+**Status icons:**
+- `✅` — on track or ahead
+- `⚠️` — behind pace
+- `⬜` — not started, not yet behind (day 1 / early week)
+- `✔️` — complete (hit target)
+
+**If no goals for the week:** send a simple greeting with a note that no goals are loaded, and remind user to drop `weekly_goals.json`.
+
+**On day 1 (Monday), all goals show `⬜` — this is correct.** No pressure on day 1.
+
+---
+
+### EOD check-in → Dynamic missing essentials alert
+
+The static EOD check-in is replaced with a dynamic check that only fires if daily essentials are missing.
+
+**Daily essentials:** `breakfast`, `lunch`, `dinner`, `sleep` (matched against `responses.message_key` for today)
+
+**`_build_eod_checkin()` in sender.py:**
+1. Gets today's `day_id`
+2. Queries `responses` for any row today where `message_key` IN (`breakfast`, `lunch`, `dinner`, `sleep`)
+3. Determines which are missing
+4. If nothing missing → **do not send anything** (exit silently)
+5. If any missing → send:
+
+```
+Still waiting on a few things today:
+  • Breakfast
+  • Sleep
+```
+
+**Sleep note:** Sleep is checked as a daily essential. It is typically logged the morning after the night in question — this is expected and fine. If not logged by EOD, the bot will remind. User answers the next morning.
+
+---
+
+### Scheduled check-ins (unchanged behavior)
+
+Breakfast, lunch, and dinner check-ins still fire on schedule as prompts. The user responds with a prefix at any time — not necessarily immediately after the prompt.
+
+**Re-ask logic removed.** The `--reask` cron jobs are eliminated. The dynamic EOD check-in replaces mid-day re-ask passes.
+
+---
+
+### Weekly grade (removed from standalone cron)
+
+Grade is now embedded in the daily morning report. Standalone `compute_grade.py` cron jobs (Wed, Fri, Sun) are removed. Grade computation is folded into `_build_morning_report()` or called as a library function.
+
+**Sunday planning prompt (unchanged):** Still fires at 8 PM via cron.
+**Saturday backlog nudge (unchanged):** Still fires at 3 PM via cron.
+
+---
+
+## Crontab (Phase 2.5 target state)
+
+```cron
+SHELL=/bin/bash
+PATH=/home/xanderabbott/assistant/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+# Daily goal report (replaces morning greeting)
+0 7  * * 1-5 cd /home/xanderabbott/assistant && python sender.py morning_greeting >> logs/cron.log 2>&1
+0 10 * * 6,0 cd /home/xanderabbott/assistant && python sender.py morning_greeting >> logs/cron.log 2>&1
+
+# Meal check-ins — prompts only
+30 8  * * 1-5 cd /home/xanderabbott/assistant && python sender.py breakfast_checkin >> logs/cron.log 2>&1
+30 10 * * 6,0 cd /home/xanderabbott/assistant && python sender.py breakfast_checkin >> logs/cron.log 2>&1
+0 12  * * *   cd /home/xanderabbott/assistant && python sender.py lunch_checkin >> logs/cron.log 2>&1
+0 19  * * *   cd /home/xanderabbott/assistant && python sender.py dinner_checkin >> logs/cron.log 2>&1
+
+# EOD check-in — dynamic; only sends if daily essentials are missing
+30 21 * * * cd /home/xanderabbott/assistant && python sender.py eod_checkin >> logs/cron.log 2>&1
+
+# Saturday backlog nudge
+0 15 * * 6 cd /home/xanderabbott/assistant && python sender.py backlog_nudge >> logs/cron.log 2>&1
+
+# Weekly goal ingestion (Monday before morning report)
+0 6 * * 1 cd /home/xanderabbott/assistant && python etl/load_weekly_goals.py >> logs/cron.log 2>&1
+
+# Sunday planning prompt
+0 20 * * 0 cd /home/xanderabbott/assistant && python sender.py weekly_planning_prompt >> logs/cron.log 2>&1
+```
+
+**Removed vs Phase 2:**
+- `--reask` passes (replaced by dynamic EOD)
+- `compute_grade.py` on Wed/Fri/Sun (grade now in morning report)
+- `link_responses.py` nightly (linking now happens at write time in bot.py)
+
+---
+
+## Goal Status Logic (db.py)
+
+`get_all_goals_with_status(week_key, days_elapsed)`:
+```python
+expected = int(target_days * (days_elapsed / 7))
+if completed >= target_days:  status = 'complete'
+elif completed >= expected:   status = 'on_track'
+elif expected == 0:           status = 'not_started'
+else:                         status = 'behind'
+```
+
+Returns list of dicts with `goal_id`, `label`, `category`, `target`, `completed`, `expected`, `status`.
+
+Backlog tone escalation (Saturday nudge and behind-pace items):
+- Mon–Tue → tone 1 (neutral)
+- Wed → tone 2 (mild)
+- Thu–Fri → tone 3 (direct)
+- Sat–Sun → tone 4 (final call)
+
+---
+
+## Weekly Goals File Format
 
 File: `/home/xanderabbott/assistant/data/weekly_goals.json`
 
@@ -236,89 +269,26 @@ File: `/home/xanderabbott/assistant/data/weekly_goals.json`
 {
   "2026-W17": {
     "workout": [
-      { "id": "w1", "label": "Morning run",    "target_days": 4 },
-      { "id": "w2", "label": "Calisthenics",   "target_days": 3 }
-    ],
-    "nutrition": [
-      { "id": "n1", "label": "Track all meals", "target_days": 7 }
+      { "id": "w1", "label": "Workout", "target_days": 3 },
+      { "id": "w2", "label": "Stretch", "target_days": 5 }
     ],
     "chores": [
-      { "id": "c1", "label": "Vacuum living room", "target_days": 1 },
-      { "id": "c2", "label": "Grocery run",        "target_days": 1 }
-    ],
-    "personal": [
-      { "id": "p1", "label": "Read 30 min", "target_days": 5 }
+      { "id": "c1", "label": "Laundry",   "target_days": 1 },
+      { "id": "c2", "label": "Groceries", "target_days": 1 }
     ]
   }
 }
 ```
 
-- `target_days` is a weekly total, not pinned to specific days of the week
-- If no entry exists for the current ISO week, start the week with zero goals — do not roll forward from the prior week
-- `load_weekly_goals.py` is called by cron Monday 6:00 AM; can also be run manually to seed mid-week
-
----
-
-### Grading Logic
-
-```
-weekly_score = SUM(completions per goal) / SUM(target_days per goal)
-             = capped at 1.0 per goal
-```
-
-Grade is sent three times per week:
-
-| Cron time | Message key |
-|---|---|
-| Wednesday 12:00 PM | `weekly_grade_wed` |
-| Friday 7:00 PM | `weekly_grade_fri` |
-| Sunday 12:00 PM | `weekly_grade_sun` |
-
-`compute_grade.py` determines which key to use based on `datetime.today().weekday()`.
-
----
-
-### Backlog Pressure
-
-A goal is behind pace when:
-```
-floor(target_days * (days_elapsed / 7)) > actual_completions
-```
-
-Tone escalates by day-of-week. Add a `tone_level` integer (1–4) to `messages.py` lookup:
-
-| Day(s) | Tone level | Prefix style |
-|---|---|---|
-| Mon–Tue | 1 | Neutral — "You haven't logged [goal] yet this week." |
-| Wed | 2 | Mild — "[Goal] is falling behind — you're at the midpoint." |
-| Thu–Fri | 3 | Direct — "[Goal] needs N more completions to hit your target." |
-| Saturday | 4 | Final — "[Goal] is at risk of not being hit this week. Today is the last chance." |
-
----
-
-### Extended Crontab (Phase 2 additions)
-
-```cron
-# Ingest weekly goals before morning greeting fires
-0 6 * * 1 /home/xanderabbott/assistant/venv/bin/python etl/load_weekly_goals.py
-
-# Grades
-0 12 * * 3 /home/xanderabbott/assistant/venv/bin/python etl/compute_grade.py
-0 19 * * 5 /home/xanderabbott/assistant/venv/bin/python etl/compute_grade.py
-0 12 * * 0 /home/xanderabbott/assistant/venv/bin/python etl/compute_grade.py
-
-# Sunday planning prompt
-0 20 * * 0 /home/xanderabbott/assistant/venv/bin/python sender.py weekly_planning_prompt
-
-# Nightly response-to-goal linking
-30 23 * * * /home/xanderabbott/assistant/venv/bin/python etl/link_responses.py
-```
+- Each new week appended as a new top-level key — old weeks ignored
+- `target_days` is a weekly total, not pinned to specific days
+- No entry for current week → zero goals, no rollover
+- Goal `label` is the prefix match key — keep labels short and unambiguous
+- Sleep goals use `target_hours` (weekly total); `parsed_value` on responses holds numeric value for summing
 
 ---
 
 ## .gitignore Requirements
-
-The following must never be committed:
 
 ```
 .env
@@ -333,10 +303,11 @@ venv/
 
 ## Common Gotchas
 
-- **`data/` subdirectory:** `DB_PATH` is `/home/xanderabbott/assistant/data/data.db` — the extra `data/` folder is real and required. A flat path will silently create a second database in the wrong place.
+- **`data/` subdirectory:** `DB_PATH` is `/home/xanderabbott/assistant/data/data.db` — flat path silently creates a second database in the wrong place.
 - **`scp` paths:** Always use full absolute paths. Tilde shorthand behaves unexpectedly over `scp`.
-- **`config.py` fallback:** The default fallback for `DB_PATH` still references `/home/pi/assistant/data.db` and needs to be updated to `/home/xanderabbott/assistant/data/data.db`.
-- **Timezone:** Pi timezone is set to `America/Chicago`. All cron times in this file are CDT. Verify with `timedatectl` if behavior seems off.
-- **systemd after code changes:** After deploying changes to `bot.py` or `config.py`, run `sudo systemctl restart assistant-bot` on the Pi.
-- **`poll_interval` in `bot.py`:** `app.run_polling()` must include `poll_interval=5.0`. Do not remove this — it is intentional future-proofing for Phase 3 LLM response latency. The correct call is `app.run_polling(poll_interval=5.0)`.
-- **Mid-week first cycle:** Phase 2 may be deployed mid-week. `load_weekly_goals.py` should be safe to run manually at any time to seed the goals table for the current ISO week. Do not add special mid-week bootstrap logic — the standard flow handles it.
+- **`config.py` fallback:** Default fallback for `DB_PATH` must be `/home/xanderabbott/assistant/data/data.db`, not the old `/home/pi/` path.
+- **Timezone:** Pi timezone is `America/Chicago`. All cron times are CDT. Verify with `timedatectl`.
+- **systemd after code changes:** After deploying changes to `bot.py` or `config.py`, run `sudo systemctl restart assistant-bot`.
+- **`poll_interval` in `bot.py`:** `app.run_polling()` must include `poll_interval=5.0`. Do not remove — intentional future-proofing for Phase 3 LLM latency.
+- **Prefix matching:** Goal label matching is case-insensitive. The stored `message_key` in `responses` is the prefix as typed, lowercased. Do not normalize further.
+- **Sleep logging is day-offset by design.** `Sleep: 7.5` sent Monday morning refers to Sunday night. The bot checks whether any `sleep` prefix entry exists for today — the offset is expected and requires no special handling.

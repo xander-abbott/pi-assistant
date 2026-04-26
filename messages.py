@@ -11,35 +11,7 @@ WEEKLY_GRADE_FRI       = "weekly_grade_fri"
 WEEKLY_GRADE_SUN       = "weekly_grade_sun"
 WEEKLY_PLANNING_PROMPT = "weekly_planning_prompt"
 BACKLOG_NUDGE          = "backlog_nudge"
-GOAL_COMPLETION        = "goal_completion"  # Done: prefix — special handling in bot.py
-
-# Order drives re-ask priority
-DAILY_SEQUENCE = [
-    MORNING_GREETING,
-    BREAKFAST_CHECKIN,
-    LUNCH_CHECKIN,
-    DINNER_CHECKIN,
-    EOD_CHECKIN,
-]
-
-# Keyword prefixes for proactive user messages ("Breakfast: ...")
-# Done: is NOT here — it has special handling in bot.py
-KEY_PREFIXES = {
-    BREAKFAST_CHECKIN: ["breakfast"],
-    LUNCH_CHECKIN:     ["lunch"],
-    DINNER_CHECKIN:    ["dinner"],
-    EOD_CHECKIN:       ["workout", "chore", "gym", "run", "calisthenics", "eod"],
-    SLEEP_LOG:         ["sleep"],
-}
-
-# If no response by this hour (24h), the re-ask job will re-send the checkin
-EXPECTED_BY_HOUR = {
-    BREAKFAST_CHECKIN: 11,
-    LUNCH_CHECKIN:     14,
-    DINNER_CHECKIN:    20,
-    EOD_CHECKIN:       22,
-    SLEEP_LOG:         11,
-}
+GOAL_COMPLETION        = "goal_completion"  # kept for DB compatibility; Done: prefix removed in Phase 2.5
 
 MESSAGE_TEXT = {
     MORNING_GREETING: (
@@ -66,14 +38,6 @@ MESSAGE_TEXT = {
         "  python etl/load_weekly_goals.py"
     ),
     BACKLOG_NUDGE: "Weekly backlog — see below.",
-}
-
-REASK_PREFIX = {
-    BREAKFAST_CHECKIN: "Still waiting on this one — what did you have for breakfast?",
-    LUNCH_CHECKIN:     "Still waiting — what did you have for lunch?",
-    DINNER_CHECKIN:    "Still waiting — what did you eat for dinner?",
-    EOD_CHECKIN:       "Still waiting — any workouts or chores to log for today?",
-    SLEEP_LOG:         "Still waiting — how many hours did you sleep last night?",
 }
 
 # ---------------------------------------------------------------------------
