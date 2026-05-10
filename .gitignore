@@ -3,5 +3,6 @@
 venv/
 __pycache__/
 *.pyc
-logs/*.log
+logs/
 data/weekly_goals.json
+data/weekly_goals/

@@ -26,6 +26,15 @@ def _parse_sleep_value(text_after_colon: str) -> str | None:
 
 
 async def handle_message(update: Update, context) -> None:
+    chat_id = update.effective_chat.id
+    user = db.get_user_by_chat_id(chat_id)
+    if user is None:
+        log.warning("Rejected message from unregistered chat_id=%s", chat_id)
+        await update.message.reply_text(
+            "You're not registered with this bot. Contact the admin to be added."
+        )
+        return
+
     text = update.message.text.strip()
 
     if ":" not in text:
@@ -36,7 +45,7 @@ async def handle_message(update: Update, context) -> None:
 
     colon_pos = text.index(":")
     prefix = text[:colon_pos].strip().lower()
-    day_id = db.get_or_create_day()
+    day_id = db.get_or_create_day(user["id"])
     week_key = db.get_week_key()
 
     parsed_value = None
@@ -46,10 +55,10 @@ async def handle_message(update: Update, context) -> None:
     response_id = db.record_response(day_id, prefix, text, parsed_value=parsed_value)
     log.info("Recorded response for '%s': %s", prefix, text[:60])
 
-    goal = db.get_goal_by_label(week_key, prefix)
+    goal = db.get_goal_by_label(user["id"], week_key, prefix)
     if goal:
         db.record_goal_completion(
-            day_id, week_key, goal["goal_id"],
+            user["id"], day_id, week_key, goal["goal_id"],
             response_id=response_id, source="prefix_match"
         )
         log.info("Goal completion recorded for '%s'", goal["goal_id"])
@@ -58,8 +67,13 @@ async def handle_message(update: Update, context) -> None:
 
 
 async def handle_start(update: Update, context) -> None:
+    chat_id = update.effective_chat.id
+    if db.get_user_by_chat_id(chat_id) is None:
+        log.info("handle_start called by unregistered chat_id=%s", chat_id)
+    else:
+        log.debug("handle_start called by registered chat_id=%s", chat_id)
     await update.message.reply_text(
-        f"Assistant bot is running.\nYour chat ID is: {update.effective_chat.id}"
+        f"Assistant bot is running.\nYour chat ID is: {chat_id}"
     )
 
 

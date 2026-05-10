@@ -1,16 +1,11 @@
 SHELL=/bin/bash
-PATH=/home/pi/assistant/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+PATH=/home/xanderabbott/assistant/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
-# Morning greeting — weekdays 7am, weekends 10am
-0 7  * * 1-5 cd /home/pi/assistant && python sender.py morning_greeting >> logs/cron.log 2>&1
-0 10 * * 6,0 cd /home/pi/assistant && python sender.py morning_greeting >> logs/cron.log 2>&1
+# Scheduler tick — runs every 15 min, fires any due messages for all active users
+*/15 * * * * cd /home/xanderabbott/assistant && venv/bin/python sender.py tick >> logs/tick.log 2>&1
 
-# Meal check-ins (every day)
-0 9  * * * cd /home/pi/assistant && python sender.py breakfast_checkin >> logs/cron.log 2>&1
-0 12 * * * cd /home/pi/assistant && python sender.py lunch_checkin    >> logs/cron.log 2>&1
-0 18 * * * cd /home/pi/assistant && python sender.py dinner_checkin   >> logs/cron.log 2>&1
-0 21 * * * cd /home/pi/assistant && python sender.py eod_checkin      >> logs/cron.log 2>&1
+# Link checkin responses to weekly goals — runs once nightly
+30 23 * * * cd /home/xanderabbott/assistant && venv/bin/python etl/link_responses.py >> logs/etl.log 2>&1
 
-# Re-ask pass — fires twice daily, checks for unanswered questions due by now
-0 14 * * * cd /home/pi/assistant && python sender.py --reask >> logs/cron.log 2>&1
-0 22 * * * cd /home/pi/assistant && python sender.py --reask >> logs/cron.log 2>&1
+# Load weekly goals from per-user JSON files — runs Monday morning before first tick
+0 6 * * 1 cd /home/xanderabbott/assistant && venv/bin/python etl/load_weekly_goals.py >> logs/etl.log 2>&1
