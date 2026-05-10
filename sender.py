@@ -4,7 +4,8 @@ Message sender — tick loop and manual send.
 
 Usage:
     python sender.py tick                               # cron entrypoint (every 15 min)
-    python sender.py send <message_key> --user <name>  # manual test send
+    python sender.py send <message_key> --user <name>  # manual send
+    SENDER_SELFTEST=1 python sender.py                 # developer self-test (requires /tmp/data_copy_chunk_a.db)
 """
 
 import argparse
@@ -273,43 +274,46 @@ def main() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Self-test (python sender.py — does NOT invoke main() / argparse)
+# Entry point
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    TEST_DB = "/tmp/data_copy_chunk_a.db"
+    if os.environ.get("SENDER_SELFTEST") != "1":
+        main()
+    else:
+        TEST_DB = "/tmp/data_copy_chunk_a.db"
 
-    if not os.path.exists(TEST_DB):
-        print(f"Test DB not found at {TEST_DB}. Run the migration first.")
-        sys.exit(1)
+        if not os.path.exists(TEST_DB):
+            print(f"Test DB not found at {TEST_DB}. Run the migration first.")
+            sys.exit(1)
 
-    # Override paths before any DB call.
-    config.DB_PATH = TEST_DB
-    # Prevent accidental real Telegram sends; any attempted send will fail
-    # gracefully inside the per-send exception handlers.
-    config.BOT_TOKEN = "test-mode-no-sends"
+        # Override paths before any DB call.
+        config.DB_PATH = TEST_DB
+        # Prevent accidental real Telegram sends; any attempted send will fail
+        # gracefully inside the per-send exception handlers.
+        config.BOT_TOKEN = "test-mode-no-sends"
 
-    db.init_db()
+        db.init_db()
 
-    # 1. compute_grade_args_for_user: Wed/Fri keys → cutoff=None
-    _test_user = {"id": 1, "timezone": "America/Chicago", "name": "xander"}
-    for _key in (messages.WEEKLY_GRADE_WED, messages.WEEKLY_GRADE_FRI):
-        _wk, _co = compute_grade.compute_grade_args_for_user(_test_user, _key)
-        assert _co is None, f"cutoff should be None for {_key}, got {_co!r}"
-    print("PASS: compute_grade_args_for_user returns cutoff=None for Wed/Fri")
+        # 1. compute_grade_args_for_user: Wed/Fri keys → cutoff=None
+        _test_user = {"id": 1, "timezone": "America/Chicago", "name": "xander"}
+        for _key in (messages.WEEKLY_GRADE_WED, messages.WEEKLY_GRADE_FRI):
+            _wk, _co = compute_grade.compute_grade_args_for_user(_test_user, _key)
+            assert _co is None, f"cutoff should be None for {_key}, got {_co!r}"
+        print("PASS: compute_grade_args_for_user returns cutoff=None for Wed/Fri")
 
-    # 2. compute_grade_args_for_user: Sun key → SQLite-format UTC string (space-separated)
-    _wk, _co = compute_grade.compute_grade_args_for_user(_test_user, messages.WEEKLY_GRADE_SUN)
-    assert _co is not None, "cutoff should not be None for Sunday"
-    assert " " in _co and "T" not in _co, f"cutoff must use SQLite space format, got {_co!r}"
-    assert _co.endswith(":00"), f"cutoff should be on-the-minute, got {_co!r}"
-    print(f"PASS: compute_grade_args_for_user returns SQLite-format cutoff for Sun: {_co!r}")
+        # 2. compute_grade_args_for_user: Sun key → SQLite-format UTC string (space-separated)
+        _wk, _co = compute_grade.compute_grade_args_for_user(_test_user, messages.WEEKLY_GRADE_SUN)
+        assert _co is not None, "cutoff should not be None for Sunday"
+        assert " " in _co and "T" not in _co, f"cutoff must use SQLite space format, got {_co!r}"
+        assert _co.endswith(":00"), f"cutoff should be on-the-minute, got {_co!r}"
+        print(f"PASS: compute_grade_args_for_user returns SQLite-format cutoff for Sun: {_co!r}")
 
-    # 3. tick() runs without crashing; grade routing included
-    print(f"Running tick() against {TEST_DB} ...")
-    try:
-        tick()
-        print("PASS: tick() completed without crashing (grade routing active)")
-    except Exception as e:
-        print(f"FAIL: tick() raised {e}")
-        sys.exit(1)
+        # 3. tick() runs without crashing; grade routing included
+        print(f"Running tick() against {TEST_DB} ...")
+        try:
+            tick()
+            print("PASS: tick() completed without crashing (grade routing active)")
+        except Exception as e:
+            print(f"FAIL: tick() raised {e}")
+            sys.exit(1)

@@ -1,3 +1,4 @@
+import os
 from datetime import time, datetime
 from zoneinfo import ZoneInfo
 
@@ -89,6 +90,10 @@ def should_fire(user, message_key, scheduled_local_time, now_utc, db_module,
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
+    if os.environ.get("SCHEDULE_SELFTEST") != "1":
+        print("schedule.py has no CLI. Run with SCHEDULE_SELFTEST=1 for tests.")
+        raise SystemExit(0)
+
     from datetime import date, timedelta, timezone
     from types import SimpleNamespace
 
