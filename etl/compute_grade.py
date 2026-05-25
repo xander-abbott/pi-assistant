@@ -12,7 +12,7 @@ import json
 import logging
 import os
 import sys
-from datetime import datetime, timezone
+from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from telegram import Bot
@@ -107,17 +107,13 @@ async def send_grade(user, week_key: str, msg_key: str, cutoff: str | None = Non
 def compute_grade_args_for_user(user, message_key: str) -> tuple[str, str | None]:
     """Return (week_key, cutoff) for the given user and grade message_key.
 
-    cutoff is a UTC datetime string in SQLite format ("YYYY-MM-DD HH:MM:SS") for
-    the Sunday noon cutoff, or None for Wednesday/Friday (all completions count).
+    cutoff is always None — all completions in the week count toward the grade
+    for every grade event (Wed, Fri, Sun). The cutoff parameter remains in
+    send_grade's signature for backwards compatibility.
     """
     local_date = datetime.now(ZoneInfo(user["timezone"])).date()
     week_key = db.get_week_key(local_date)
-    cutoff = None
-    if message_key == messages.WEEKLY_GRADE_SUN:
-        cutoff_local = datetime(local_date.year, local_date.month, local_date.day,
-                                12, 0, tzinfo=ZoneInfo(user["timezone"]))
-        cutoff = cutoff_local.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-    return week_key, cutoff
+    return week_key, None
 
 
 def process_user(user) -> None:

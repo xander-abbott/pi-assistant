@@ -23,7 +23,7 @@ WEEKLY_EVENTS = {
     "default": {
         "weekly_grade_wed": {"day_of_week": 2, "time": time(12, 0)},  # Wednesday noon local
         "weekly_grade_fri": {"day_of_week": 4, "time": time(19, 0)},  # Friday 7 PM local
-        "weekly_grade_sun": {"day_of_week": 6, "time": time(12, 0)},  # Sunday noon local
+        "weekly_grade_sun": {"day_of_week": 6, "time": time(21, 0)},  # Sunday 9 PM local
     },
 }
 
@@ -167,12 +167,12 @@ if __name__ == "__main__":
         f"weekend morning should be 10:00, got {sunday_events['morning_greeting']}"
     assert "weekly_grade_sun" in sunday_events, \
         "weekly_grade_sun should appear on Sunday"
-    assert sunday_events["weekly_grade_sun"] == time(12, 0), \
-        f"weekly_grade_sun should fire at 12:00, got {sunday_events['weekly_grade_sun']}"
+    assert sunday_events["weekly_grade_sun"] == time(21, 0), \
+        f"weekly_grade_sun should fire at 21:00, got {sunday_events['weekly_grade_sun']}"
     for absent_key in ("weekly_grade_wed", "weekly_grade_fri"):
         assert absent_key not in sunday_events, \
             f"{absent_key} should not appear on Sunday"
-    print("PASS: weekend morning_greeting = 10:00, weekly_grade_sun at 12:00 on Sunday only")
+    print("PASS: weekend morning_greeting = 10:00, weekly_grade_sun at 21:00 on Sunday only")
 
     # 9. get_events_for_user: weekly_grade_wed present on Wednesday, no fri/sun grade
     wednesday = date(2026, 5, 13)

@@ -83,7 +83,7 @@ WEEKLY_EVENTS = {
     "default": {
         "weekly_grade_wed": {"day_of_week": 2, "time": time(12, 0)},  # Wednesday noon
         "weekly_grade_fri": {"day_of_week": 4, "time": time(19, 0)},  # Friday 7 PM
-        "weekly_grade_sun": {"day_of_week": 6, "time": time(12, 0)},  # Sunday noon
+        "weekly_grade_sun": {"day_of_week": 6, "time": time(21, 0)},  # Sunday 9 PM
     },
 }
 ```
@@ -97,8 +97,6 @@ The `WEEKLY_EVENTS` keys are the same strings as the `messages.WEEKLY_GRADE_*` c
 **Core principle**: store everything in UTC, convert at the edges.
 
 `get_or_create_day(user_id)` computes "today" in the user's local timezone, not the Pi's system time. Without this, a late-evening Pacific user's log lands on tomorrow's Pi-local Central day.
-
-The Sunday noon cutoff for grading is anchored to the user's local noon, converted to UTC for the SQLite string comparison. SQLite's `datetime('now')` produces space-separated strings (`"YYYY-MM-DD HH:MM:SS"`); the cutoff string must use the same format — not ISO 8601 T-format.
 
 Pacific and Central observe DST on the same days; the 2-hour gap is stable year-round. The tick's `*/15` cadence is idempotent (won't double-send because of the `was_message_sent` guard), so DST fall-back duplicate tick firings are harmless.
 
@@ -132,9 +130,9 @@ All builders take a `user` dict and derive local date from `user["timezone"]`:
 
 ## Grade events (`etl/compute_grade.py`)
 
-`compute_grade_args_for_user(user, message_key) → (week_key, cutoff)`:
-- For `weekly_grade_sun`: cutoff = user's local noon in UTC, SQLite format.
-- For `weekly_grade_wed/fri`: cutoff = `None` (all completions in the week count).
+`compute_grade_args_for_user(user, message_key) → (week_key, cutoff)`: returns `cutoff = None` for all three grade keys (Wed, Fri, Sun) — every completion in the week counts. The `cutoff` parameter is retained in `send_grade`'s signature for backwards compatibility but is never populated by the tick loop.
+
+Sunday's grade fires at 9 PM user-local (giving the user a full Sunday to log completions) rather than at noon. Wed fires at noon, Fri at 7 PM.
 
 `send_grade(user, week_key, msg_key, cutoff)` is async and called via `asyncio.run()` from the tick loop. It: computes grade → records `weekly_grades` row → formats message → sends via Telegram → marks grade as sent → records `sent_messages`.
 
@@ -144,7 +142,9 @@ All builders take a `user` dict and derive local date from `user["timezone"]`:
 
 Weekly goals live at `data/weekly_goals/<user_id>.json`. `etl/load_weekly_goals.py` iterates all active users and loads each user's file. If a user's file is missing, the script logs a warning and continues for other users.
 
-`etl/link_responses.py` runs nightly and links today's checkin responses to weekly goals, recording `goal_completions` rows. Per-user, per-week, with the Sunday noon cutoff respected.
+**Auto-roll behavior**: If a user's JSON file has no entry for the current week at load time, the loader duplicates the most recent prior week's entries as the new week, writes back to the JSON file, and proceeds with the upsert. ISO week keys (`YYYY-Www`) sort correctly as strings, so "most recent prior" is `max(k for k in keys if k < current_week_key)`. First-time users (no prior weeks at all) get the "no goals loaded" experience as before — the loader logs a warning and skips. The roll-forward also runs on manual mid-week invocations, so re-running the loader is safe.
+
+`etl/link_responses.py` runs nightly and links today's checkin responses to weekly goals, recording `goal_completions` rows. Per-user, per-week.
 
 ## Goal completion guards (`db.record_goal_completion`)
 
@@ -160,10 +160,9 @@ Both raise `ValueError` on failure.
 2. IANA timezone names only — `ZoneInfo()` will raise on invalid names, which is the desired failure mode.
 3. `received_at` / `sent_at` / `completed_at` stay UTC. Never store local time in the DB.
 4. `get_or_create_day` uses user's local date, not `date.today()`.
-5. Sunday noon cutoff must be anchored to user's local time and converted to UTC SQLite format for string comparison.
-6. Tick loop logs a summary line every run.
-7. `message_key` string values in `messages.py` are stable — renaming orphans all historical `sent_messages` and `responses` rows.
-8. Grade event schedule keys must equal the `messages.WEEKLY_GRADE_*` constants so `was_message_sent` prevents re-fires.
+5. Tick loop logs a summary line every run.
+6. `message_key` string values in `messages.py` are stable — renaming orphans all historical `sent_messages` and `responses` rows.
+7. Grade event schedule keys must equal the `messages.WEEKLY_GRADE_*` constants so `was_message_sent` prevents re-fires.
 
 ## Gotchas
 
